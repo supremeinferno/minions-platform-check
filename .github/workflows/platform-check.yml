@@ -82,3 +82,21 @@ jobs:
           name: logs-${{ matrix.os }}
           path: ${{ env.MINIONS_ENGINE_HOME }}/**/*.log
           if-no-files-found: ignore
+
+  test-all-patched:
+    # The same suite with the proposed fixes in patches/ applied.
+    strategy: { fail-fast: false, matrix: { os: [windows-2025, ubuntu-24.04] } }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { repository: latent-spaces/minions, ref: "${{ inputs.ref || 'main' }}" }
+      - uses: actions/checkout@v4
+        with: { path: _pc }
+      - name: Apply patches
+        shell: bash
+        run: for p in _pc/patches/*.patch; do echo "applying $p"; git apply --verbose "$p"; done; rm -rf _pc; git status --short
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - run: npm ci
+      - run: npm run test:all
