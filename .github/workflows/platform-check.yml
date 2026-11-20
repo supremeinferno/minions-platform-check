@@ -1,0 +1,75 @@
+name: Minions platform check
+# Native checks of latent-spaces/minions on Windows, Linux and macOS. Nothing here talks to a model.
+on:
+  workflow_dispatch:
+    inputs:
+      ref: { description: 'minions ref', default: 'main' }
+  push:
+permissions:
+  contents: read
+jobs:
+  test-all:
+    strategy: { fail-fast: false, matrix: { os: [ubuntu-24.04, windows-2025, macos-15] } }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { repository: latent-spaces/minions, ref: "${{ inputs.ref || 'main' }}" }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - run: git log -1 --format='minions %h %s'
+      - run: npm ci
+      - run: npm run test:all
+
+  install-smoke:
+    # The README's install path, from a folder with spaces, on an isolated engine.
+    strategy: { fail-fast: false, matrix: { os: [ubuntu-24.04, windows-2025, macos-15] } }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run: { shell: bash, working-directory: 'dir with space/minions' }
+    env:
+      MINIONS_ENGINE_PORT: '8799'
+      M: node tools/setup/minions.mjs
+    steps:
+      - uses: actions/checkout@v4
+        with: { repository: latent-spaces/minions, ref: "${{ inputs.ref || 'main' }}", path: 'dir with space/minions' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Isolated engine folder (with a space)
+        run: echo "MINIONS_ENGINE_HOME=$RUNNER_TEMP/engine home" >> "$GITHUB_ENV"
+      - name: Setup
+        run: npm run setup -- --no-register --owner-name "CI Test" --owner-email ci@example.com
+      - name: Status says engine and service are running
+        run: |
+          $M status --json | tee status.json
+          node -e 'const s=require("./status.json"); if (s.engine!=="running"||!s.service?.running) { console.error("NOT RUNNING"); process.exit(1) }'
+      - name: The local app is served
+        run: curl -fsS "http://127.0.0.1:8799/" | grep -qi '<html' && echo "app page served"
+      - name: Logs
+        run: |
+          $M logs --lines 15
+          $M logs --service --lines 15
+      - name: Stop
+        run: $M stop
+      - name: Everything stopped and the port is free
+        run: |
+          $M status --json | tee status.json
+          node -e 'const s=require("./status.json"); if (s.engine==="running"||s.service?.running) { console.error("STILL RUNNING"); process.exit(1) }'
+          ! curl -fsS --max-time 3 "http://127.0.0.1:8799/" >/dev/null && echo "port 8799 closed"
+      - name: Start again, then stop at once
+        run: |
+          $M start
+          $M status --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); console.log(s.engine, s.service?.running); if(s.engine!=="running") process.exit(1)})'
+          $M stop --now
+      - name: Leftover node processes
+        if: always()
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then tasklist //FI "IMAGENAME eq node.exe" || true; else ps -eo pid,command | grep -i '[n]ode' || echo none; fi
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.os }}
+          path: ${{ runner.temp }}/engine home/**/*.log
+          if-no-files-found: ignore
